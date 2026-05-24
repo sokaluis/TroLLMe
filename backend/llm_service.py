@@ -1,9 +1,12 @@
 import asyncio
 import json
+import logging
 import httpx
 from models import Question, ModelResponse, Slot
 import base64
 from config import OPENROUTER_API_KEY, OPENROUTER_BASE_URL, IMAGE_MODEL, MODELS, WORLDVIEWS_BY_ID
+
+logger = logging.getLogger(__name__)
 
 PROMPT_TEMPLATE = """\
 Responde el siguiente dilema moral al estilo del tranvía.
@@ -162,11 +165,19 @@ async def ask_slots(question: Question, slots: list[Slot]) -> list[ModelResponse
     async with httpx.AsyncClient() as client:
         tasks = []
         for slot in slots:
-            model_info = MODELS_BY_ID.get(slot.model_id, {})
+            model_info = MODELS_BY_ID.get(slot.model_id)
+            if model_info is None:
+                logger.warning("Unknown model_id %s — should have been validated upstream", slot.model_id)
+                model_info = {}
             display_name = model_info.get("display_name", slot.model_id)
-            worldview = WORLDVIEWS_BY_ID.get(slot.worldview_id, {})
+
+            worldview = WORLDVIEWS_BY_ID.get(slot.worldview_id)
+            if worldview is None:
+                logger.warning("Unknown worldview_id %s — should have been validated upstream", slot.worldview_id)
+                worldview = {}
             system_prompt = worldview.get("system_prompt", "")
             worldview_label = worldview.get("label", slot.worldview_id)
+
             tasks.append(
                 _query_slot(client, slot, user_message, system_prompt, display_name, worldview_label)
             )

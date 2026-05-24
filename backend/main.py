@@ -11,6 +11,7 @@ from llm_service import ask_slots, generate_question_image
 from models import (
     AskRequest,
     AskResponse,
+    ImageOperationResult,
     ModelInfo,
     Question,
     QuestionCreate,
@@ -47,6 +48,52 @@ def _detect_media_type(data: bytes) -> str:
     if data[:4] == b'RIFF' and data[8:12] == b'WEBP':
         return 'image/webp'
     return 'image/octet-stream'
+
+
+def _validate_model_id(model_id: str) -> None:
+    known = {m["model_id"] for m in MODELS}
+    if model_id not in known:
+        raise HTTPException(status_code=422, detail=f"Unknown model_id: {model_id}")
+
+
+def _validate_worldview_id(worldview_id: str) -> None:
+    known = {w["id"] for w in WORLDVIEWS}
+    if worldview_id not in known:
+        raise HTTPException(status_code=422, detail=f"Unknown worldview_id: {worldview_id}")
+
+
+def _validate_question_row(row: dict, index: int) -> list[str]:
+    """Validate a single upload question row. Returns list of error messages (empty = valid)."""
+    errors: list[str] = []
+    # id
+    if "id" not in row:
+        errors.append("missing 'id'")
+    else:
+        try:
+            int(row["id"])
+        except (ValueError, TypeError):
+            errors.append(f"invalid 'id': {row['id']!r}")
+    # title
+    title = row.get("title")
+    if not title or not str(title).strip():
+        errors.append("'title' must not be blank")
+    # prompt
+    prompt = row.get("prompt")
+    if not prompt or not str(prompt).strip():
+        errors.append("'prompt' must not be blank")
+    # options
+    options = row.get("options")
+    if not isinstance(options, list):
+        errors.append("'options' must be a list")
+    elif len(options) < 2:
+        errors.append("at least 2 options required")
+    else:
+        stripped = [str(o).strip() for o in options]
+        if any(not o for o in stripped):
+            errors.append("option text must not be blank")
+        elif len(set(stripped)) != len(stripped):
+            errors.append("duplicate option values are not allowed")
+    return errors
 
 
 def _load_questions_from_file(path: str) -> list[Question]:
@@ -122,23 +169,36 @@ def delete_question(question_id: int):
 
 
 @app.get("/api/questions/{question_id}/image")
-async def get_question_image(question_id: int):
+def get_question_image(question_id: int):
     question = next((q for q in _questions if q.id == question_id), None)
     if question is None:
         raise HTTPException(status_code=404, detail="Question not found")
     path = _image_path(question_id)
     if not os.path.exists(path):
-        try:
-            image_bytes = await generate_question_image(question)
-        except Exception as exc:
-            raise HTTPException(status_code=502, detail=f"Image generation failed: {exc}")
-        os.makedirs(IMAGES_DIR, exist_ok=True)
-        with open(path, "wb") as f:
-            f.write(image_bytes)
-    else:
-        with open(path, "rb") as f:
-            image_bytes = f.read()
+        raise HTTPException(status_code=404, detail="No cached image for this question")
+    with open(path, "rb") as f:
+        image_bytes = f.read()
     return Response(content=image_bytes, media_type=_detect_media_type(image_bytes))
+
+
+@app.post("/api/questions/{question_id}/image", response_model=ImageOperationResult)
+async def post_question_image(question_id: int):
+    question = next((q for q in _questions if q.id == question_id), None)
+    if question is None:
+        raise HTTPException(status_code=404, detail="Question not found")
+    try:
+        image_bytes = await generate_question_image(question)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Image generation failed: {exc}")
+    os.makedirs(IMAGES_DIR, exist_ok=True)
+    path = _image_path(question_id)
+    with open(path, "wb") as f:
+        f.write(image_bytes)
+    return ImageOperationResult(
+        question_id=question_id,
+        cached=True,
+        media_type=_detect_media_type(image_bytes),
+    )
 
 
 @app.delete("/api/questions/{question_id}/image", status_code=204)
@@ -165,6 +225,11 @@ async def ask(request: AskRequest):
     question = next((q for q in _questions if q.id == request.question_id), None)
     if question is None:
         raise HTTPException(status_code=404, detail="Question not found")
+
+    # Catalog validation before any LLM call
+    for slot in request.slots:
+        _validate_model_id(slot.model_id)
+        _validate_worldview_id(slot.worldview_id)
 
     responses = await ask_slots(question, request.slots)
     for resp in responses:
@@ -200,13 +265,42 @@ async def upload_questions(file: UploadFile = File(...)):
     global _questions
     content = (await file.read()).decode("utf-8")
     filename = file.filename or ""
+
+    # Parse into raw dicts first
     try:
         if filename.endswith(".csv"):
-            _questions = _parse_questions_csv(content)
+            rows: list[dict] = list(csv.DictReader(io.StringIO(content)))
+            for row in rows:
+                row["options"] = [o.strip() for o in row["options"].split(";")]
         else:
-            data = json.loads(content)
-            _questions = [Question(**q) for q in data]
+            rows = json.loads(content)
+            if not isinstance(rows, list):
+                raise HTTPException(status_code=422, detail="JSON payload must be an array")
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=422, detail=f"Invalid JSON: {exc}")
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"Failed to parse file: {exc}")
+        raise HTTPException(status_code=422, detail=f"Failed to parse file: {exc}")
+
+    # Atomic validation: validate ALL rows before any mutation
+    for i, row in enumerate(rows):
+        if not isinstance(row, dict):
+            raise HTTPException(
+                status_code=422,
+                detail=f"Row {i} is not an object: {row!r}",
+            )
+        row_errors = _validate_question_row(row, i)
+        if row_errors:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Row {i} invalid: {'; '.join(row_errors)}",
+            )
+
+    # All rows valid — create Question objects and save
+    try:
+        parsed = [Question(**row) for row in rows]
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=f"Question construction failed: {exc}")
+
+    _questions = parsed
     _save_questions_to_file(QUESTIONS_FILE, _questions)
     return _questions
