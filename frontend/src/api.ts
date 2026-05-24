@@ -1,10 +1,16 @@
-import type { AskResponse, ModelInfo, Question, QuestionCreate, Slot, Worldview } from './types'
+import type { ApiError, AskResponse, ImageOperationResult, ModelInfo, Question, QuestionCreate, Slot, Worldview } from './types'
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await fetch(path, options)
   if (!res.ok) {
-    const text = await res.text()
-    throw new Error(`${res.status} ${res.statusText}: ${text}`)
+    let detail: unknown
+    try { detail = await res.json() } catch { /* body may not be JSON */ }
+    const apiError: ApiError = {
+      message: res.statusText || 'Request failed',
+      status: res.status,
+      detail,
+    }
+    throw apiError
   }
   if (res.status === 204) return undefined as T
   return res.json() as Promise<T>
@@ -67,6 +73,10 @@ export function getQuestionImageUrl(id: number, bust: number): string {
   return `/api/questions/${id}/image${bust > 0 ? `?v=${bust}` : ''}`
 }
 
-export function regenerateQuestionImage(id: number): Promise<void> {
+export function generateQuestionImage(id: number): Promise<ImageOperationResult> {
+  return request<ImageOperationResult>(`/api/questions/${id}/image`, { method: 'POST' })
+}
+
+export function deleteQuestionImage(id: number): Promise<void> {
   return request<void>(`/api/questions/${id}/image`, { method: 'DELETE' })
 }

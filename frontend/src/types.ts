@@ -44,3 +44,17 @@ export interface AskResponse {
   question_id: number
   responses: ModelResponse[]
 }
+
+export type SlotRunState = 'idle' | 'loading' | 'success' | 'error'
+
+export interface ApiError {
+  message: string
+  status?: number
+  detail?: unknown
+}
+
+export interface ImageOperationResult {
+  question_id: number
+  cached: boolean
+  media_type: string
+}
