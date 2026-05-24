@@ -34,17 +34,18 @@ function saveToStorage(slots: Slot[]) {
 
 export function useSlotsPersistence(models: ModelInfo[], worldviews: Worldview[]) {
   const modelsReady = models.length > 0
-  const initialSlots = useMemo(() => {
-    if (!modelsReady) return []
-    return loadFromStorage() ?? makeDefaultSlots(models, worldviews)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [modelsReady])
+  const defaultSlots = useMemo(
+    () => (modelsReady ? makeDefaultSlots(models, worldviews) : []),
+    [modelsReady, models, worldviews],
+  )
 
-  const [slots, setSlotsState] = useState<Slot[]>(initialSlots)
+  const [storedSlots, setStoredSlots] = useState<Slot[] | null>(() => loadFromStorage())
+  const slots = storedSlots ?? defaultSlots
 
   function setSlots(nextOrFn: Slot[] | ((prev: Slot[]) => Slot[])) {
-    setSlotsState((prev) => {
-      const next = typeof nextOrFn === 'function' ? nextOrFn(prev) : nextOrFn
+    setStoredSlots((prev) => {
+      const current = prev ?? defaultSlots
+      const next = typeof nextOrFn === 'function' ? nextOrFn(current) : nextOrFn
       saveToStorage(next)
       return next
     })
