@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import csv
 import hashlib
 import io
@@ -36,11 +38,20 @@ def compute_question_hash(question: Question) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-def _is_duplicate(record: dict, question_hash: str, model_id: str, worldview_id: str) -> bool:
-    return (
-        record.get("question_hash") == question_hash
-        and record.get("model_id") == model_id
-        and record.get("worldview_id") == worldview_id
+def _has_prior_success(records: list[dict], question_hash: str, model_id: str, worldview_id: str) -> bool:
+    """True when a record without an error already exists for this slot.
+
+    Only successful responses act as dedupe blockers.  Error records are
+    never treated as duplicates — a later successful retry will always be
+    persisted.  This preserves the audit/export history while fixing the
+    retry-after-error gap.
+    """
+    return any(
+        r.get("question_hash") == question_hash
+        and r.get("model_id") == model_id
+        and r.get("worldview_id") == worldview_id
+        and not r.get("error")
+        for r in records
     )
 
 
@@ -48,7 +59,7 @@ def save_response(question: Question, response: ModelResponse) -> StoredResponse
     question_hash = compute_question_hash(question)
     records = _load_all()
 
-    if any(_is_duplicate(r, question_hash, response.model_id, response.worldview_id) for r in records):
+    if _has_prior_success(records, question_hash, response.model_id, response.worldview_id):
         return None
 
     stored = StoredResponse(
