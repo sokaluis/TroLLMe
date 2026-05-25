@@ -47,37 +47,48 @@ A side-by-side comparison tool that presents moral dilemmas (trolley-problem sty
 
 - Python 3.11+
 - Node.js 18+
+- pnpm 11.1.2 for the frontend
 - An [OpenRouter](https://openrouter.ai) API key
 
 ## Setup
 
-### 1. Clone and configure environment
+### 1. Backend
 
-Create `backend/.env`:
-
-```
-OPENROUTER_API_KEY=sk-or-...
-```
-
-### 2. Backend
+Create a local virtual environment and install the Python dependencies:
 
 ```bash
 cd backend
-pip install -r requirements.txt
-python -m uvicorn main:app --port 8000 --reload
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
 ```
 
-The API will be available at `http://localhost:8000`. Interactive docs at `http://localhost:8000/docs`.
+Run the API:
 
-### 3. Frontend
+```bash
+.venv/bin/python -m uvicorn main:app --port 8000 --reload
+```
+
+The API will be available at `http://localhost:8000`. Interactive docs are available at `http://localhost:8000/docs`.
+
+The backend reads the OpenRouter API key from `OPENROUTER_API_KEY`. Export it in your shell or provide it through your local environment before querying models.
+
+### 2. Frontend
+
+The frontend uses pnpm only. Do not use npm or yarn in `frontend/`.
 
 ```bash
 cd frontend
-npm install
-npm run dev
+pnpm install
+pnpm dev
 ```
 
 The UI will be available at `http://localhost:5173`.
+
+If pnpm is unavailable but Corepack is installed, enable pnpm first:
+
+```bash
+corepack enable pnpm
+```
 
 ## Usage
 
