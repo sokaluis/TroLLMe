@@ -1,29 +1,18 @@
-import { useEffect, useRef, useState } from 'react'
-import {
-  askQuestion,
-  createQuestion,
-  deleteQuestion,
-  fetchModels,
-  fetchQuestions,
-  fetchWorldviews,
-  updateQuestion,
-} from './api'
+import { useRef, useState } from 'react'
+import { useBootstrapData } from './hooks/useBootstrapData'
+import { useSlotsPersistence } from './hooks/useSlotsPersistence'
+import { useAskFlow } from './hooks/useAskFlow'
+import { useQuestionMutations } from './hooks/useQuestionMutations'
+import ConfirmationUI from './components/ConfirmationUI'
+import EmptyState from './components/EmptyState'
 import ExportButton from './components/ExportButton'
 import QuestionCard from './components/QuestionCard'
 import QuestionFormModal from './components/QuestionFormModal'
 import ResultsTable from './components/ResultsTable'
 import SlotConfigurator from './components/SlotConfigurator'
+import SlotResultFeedback from './components/SlotResultFeedback'
 import UploadButton from './components/UploadButton'
-import type { ModelInfo, ModelResponse, Question, QuestionCreate, Slot, Worldview } from './types'
-
-function makeDefaultSlots(models: ModelInfo[], worldviews: Worldview[]): Slot[] {
-  const defaultWorldview = worldviews[0]?.id ?? ''
-  return models.map((m, i) => ({
-    slot_id: `slot-init-${i}`,
-    model_id: m.model_id,
-    worldview_id: defaultWorldview,
-  }))
-}
+import type { ModelResponse, Question, QuestionCreate, Slot } from './types'
 
 type ModalState =
   | { mode: 'create' }
@@ -31,28 +20,25 @@ type ModalState =
   | null
 
 export default function App() {
-  const [questions, setQuestions] = useState<Question[]>([])
-  const [models, setModels] = useState<ModelInfo[]>([])
-  const [worldviews, setWorldviews] = useState<Worldview[]>([])
-  const [slots, setSlots] = useState<Slot[]>([])
+  const {
+    questions,
+    setQuestions,
+    models,
+    worldviews,
+    loading: bootLoading,
+    error: bootError,
+  } = useBootstrapData()
+
+  const { slots, setSlots } = useSlotsPersistence(models, worldviews)
+  const { ask, slotStates, loading: askLoading, error: askError } = useAskFlow(slots)
+  const { create, update, remove } = useQuestionMutations()
+
   const [index, setIndex] = useState(0)
   const [responsesMap, setResponsesMap] = useState<Record<number, ModelResponse[]>>({})
-  const [loading, setLoading] = useState(false)
-  const [initError, setInitError] = useState<string | null>(null)
   const [modal, setModal] = useState<ModalState>(null)
+  const [deleteConfirm, setDeleteConfirm] = useState(false)
 
   const prevSlotsRef = useRef<Slot[]>([])
-
-  useEffect(() => {
-    Promise.all([fetchQuestions(), fetchModels(), fetchWorldviews()])
-      .then(([qs, ms, ws]) => {
-        setQuestions(qs)
-        setModels(ms)
-        setWorldviews(ws)
-        setSlots(makeDefaultSlots(ms, ws))
-      })
-      .catch((err) => setInitError(String(err)))
-  }, [])
 
   function handleSlotsChange(newSlots: Slot[]) {
     const prev = prevSlotsRef.current
@@ -62,18 +48,18 @@ export default function App() {
           const old = prev.find((p) => p.slot_id === s.slot_id)
           return old && (old.model_id !== s.model_id || old.worldview_id !== s.worldview_id)
         })
-        .map((s) => s.slot_id)
+        .map((s) => s.slot_id),
     )
     const removedSlotIds = new Set(
-      prev.filter((p) => !newSlots.find((s) => s.slot_id === p.slot_id)).map((p) => p.slot_id)
+      prev.filter((p) => !newSlots.find((s) => s.slot_id === p.slot_id)).map((p) => p.slot_id),
     )
 
     if (changedSlotIds.size > 0 || removedSlotIds.size > 0) {
-      setResponsesMap((prev) => {
+      setResponsesMap((prevMap) => {
         const next: Record<number, ModelResponse[]> = {}
-        for (const [qid, resps] of Object.entries(prev)) {
+        for (const [qid, resps] of Object.entries(prevMap)) {
           const filtered = resps.filter(
-            (r) => !changedSlotIds.has(r.slot_id) && !removedSlotIds.has(r.slot_id)
+            (r) => !changedSlotIds.has(r.slot_id) && !removedSlotIds.has(r.slot_id),
           )
           next[Number(qid)] = filtered
         }
@@ -89,18 +75,13 @@ export default function App() {
 
   async function handleAsk() {
     if (!question || slots.length === 0) return
-    setLoading(true)
-    try {
-      const result = await askQuestion(question.id, slots)
-      setResponsesMap((prev) => ({ ...prev, [question.id]: result.responses }))
-    } catch (err) {
-      alert(`Error: ${err}`)
-    } finally {
-      setLoading(false)
+    const responses = await ask(question.id)
+    if (responses.length > 0) {
+      setResponsesMap((prev) => ({ ...prev, [question.id]: responses }))
     }
   }
 
-  function handleUploaded(newQuestions: Question[]) {
+  async function handleUploaded(newQuestions: Question[]) {
     setQuestions(newQuestions)
     setIndex(0)
     setResponsesMap({})
@@ -108,23 +89,27 @@ export default function App() {
 
   async function handleSaveQuestion(data: QuestionCreate) {
     if (modal?.mode === 'edit') {
-      const updated = await updateQuestion(modal.question.id, data)
-      setQuestions((prev) => prev.map((q) => (q.id === updated.id ? updated : q)))
+      const updated = await update(modal.question.id, data)
+      if (updated) {
+        setQuestions((prev) => prev.map((q) => (q.id === updated.id ? updated : q)))
+      }
     } else {
-      const created = await createQuestion(data)
-      setQuestions((prev) => {
-        const next = [...prev, created]
-        setIndex(next.length - 1)
-        return next
-      })
+      const created = await create(data)
+      if (created) {
+        setQuestions((prev) => {
+          const next = [...prev, created]
+          setIndex(next.length - 1)
+          return next
+        })
+      }
     }
     setModal(null)
   }
 
   async function handleDeleteQuestion() {
     if (!question) return
-    try {
-      await deleteQuestion(question.id)
+    const ok = await remove(question.id)
+    if (ok) {
       setResponsesMap((prev) => {
         const next = { ...prev }
         delete next[question.id]
@@ -135,19 +120,30 @@ export default function App() {
         setIndex((i) => Math.min(i, Math.max(0, next.length - 1)))
         return next
       })
-    } catch (err) {
-      alert(`Error: ${err}`)
     }
   }
 
   const currentResponses = question ? (responsesMap[question.id] ?? []) : []
 
-  if (initError) {
+  // --- Render paths ---
+
+  if (bootError) {
     return (
       <div className="min-h-screen bg-gray-50 flex items-center justify-center">
         <div className="bg-white rounded-2xl shadow-sm border border-red-200 p-8 max-w-md text-center">
           <p className="text-red-600 font-semibold mb-2">Failed to load</p>
-          <p className="text-gray-500 text-sm">{initError}</p>
+          <p className="text-gray-500 text-sm">{bootError.message}</p>
+        </div>
+      </div>
+    )
+  }
+
+  if (bootLoading) {
+    return (
+      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
+        <div className="animate-pulse space-y-4 text-center">
+          <div className="mx-auto w-16 h-16 rounded-2xl bg-gray-200" />
+          <p className="text-gray-400 text-sm">Loading…</p>
         </div>
       </div>
     )
@@ -160,6 +156,19 @@ export default function App() {
           initial={modal.mode === 'edit' ? modal.question : undefined}
           onSave={handleSaveQuestion}
           onCancel={() => setModal(null)}
+        />
+      )}
+
+      {deleteConfirm && question && (
+        <ConfirmationUI
+          message={`Delete "${question.title}"? This cannot be undone.`}
+          confirmLabel="Delete"
+          variant="danger"
+          onConfirm={() => {
+            setDeleteConfirm(false)
+            handleDeleteQuestion()
+          }}
+          onCancel={() => setDeleteConfirm(false)}
         />
       )}
 
@@ -184,7 +193,10 @@ export default function App() {
 
       <main className="max-w-5xl mx-auto px-4 sm:px-6 py-8 space-y-6">
         {questions.length === 0 ? (
-          <div className="text-center py-20 text-gray-400">Loading questions…</div>
+          <EmptyState
+            onAdd={() => setModal({ mode: 'create' })}
+            onUpload={() => document.querySelector<HTMLInputElement>('input[type="file"]')?.click()}
+          />
         ) : question ? (
           <>
             <SlotConfigurator
@@ -202,8 +214,14 @@ export default function App() {
               onNext={() => setIndex((i) => Math.min(questions.length - 1, i + 1))}
               onAsk={handleAsk}
               onEdit={() => setModal({ mode: 'edit', question })}
-              onDelete={handleDeleteQuestion}
-              loading={loading}
+              onDelete={() => setDeleteConfirm(true)}
+              loading={askLoading}
+            />
+
+            <SlotResultFeedback
+              slots={slots}
+              slotStates={slotStates}
+              askError={askError}
             />
 
             <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-6">
@@ -213,7 +231,7 @@ export default function App() {
               <ResultsTable
                 slots={slots}
                 responses={currentResponses}
-                loading={loading}
+                loading={askLoading}
               />
             </div>
           </>
